@@ -1,105 +1,128 @@
 const http = require('http');
 const { URL } = require('url');
 const { chromium } = require('playwright');
-const https = require('https');
 
-// 错误处理
+// 增强错误日志
 const logError = (error, context = '') => {
-  console.error(`[${new Date().toISOString()}] ERROR [${context}]:`, error.message, error.stack);
+  const timestamp = new Date().toISOString();
+  console.error(`[${timestamp}] ERROR [${context}]`, {
+    message: error.message,
+    stack: error.stack,
+    type: error.constructor.name
+  });
 };
 
 process.on('uncaughtException', (err) => logError(err, 'uncaughtException'));
 process.on('unhandledRejection', (err) => logError(err, 'unhandledRejection'));
 
-// 浏览器实例池
+// 浏览器连接池
 class BrowserPool {
-  static instance;
-  browsers = new Set();
+  static MAX_INSTANCES = 5;
+  static activeInstances = 0;
+  static pool = [];
 
-  constructor() {
-    if (BrowserPool.instance) return BrowserPool.instance;
-    BrowserPool.instance = this;
-  }
+  static async acquire() {
+    if (this.activeInstances >= this.MAX_INSTANCES) {
+      throw new Error('Browser pool exhausted');
+    }
 
-  async launch() {
-const browser = await chromium.launch({
-  headless: true,
-  args: [
-    '--disable-dev-shm-usage',
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-gpu'
-  ]
-});
-    this.browsers.add(browser);
+    const browser = await chromium.launch({
+      headless: true,
+      timeout: 60000,
+      args: [
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-setuid-sandbox'
+      ]
+    });
+    
+    this.activeInstances++;
+    this.pool.push(browser);
     return browser;
   }
 
-  async cleanup() {
-    for (const browser of this.browsers) {
+  static async release(browser) {
+    try {
       await browser.close();
+      this.pool = this.pool.filter(b => b !== browser);
+      this.activeInstances--;
+    } catch (err) {
+      logError(err, 'browser_release');
     }
-    this.browsers.clear();
   }
 }
 
-// 渲染服务
+// 渲染核心逻辑
 const renderHtml = async (params) => {
-  const {
-    url: targetUrl,
-    html,
-    headers = {},
-    js_source,
-    proxy,
-    http_method = 'GET',
-    body = '',
-    sourceRegex
-  } = params;
+  let browser, context;
 
-  const browserPool = new BrowserPool();
-  const browser = await browserPool.launch();
-  
   try {
-    const context = await browser.newContext({
+    // 参数验证
+    if (!params.url && !params.html) {
+      throw new Error('Missing required parameter: url or html');
+    }
+
+    // 获取浏览器实例
+    browser = await BrowserPool.acquire();
+    context = await browser.newContext({
       ignoreHTTPSErrors: true,
-      extraHTTPHeaders: headers,
-      userAgent: headers['User-Agent'] || await chromium.userAgent()
+      userAgent: params.headers?.['User-Agent'] || await chromium.userAgent(),
+      proxy: params.proxy ? parseProxy(params.proxy) : undefined
     });
 
     const page = await context.newPage();
-    await page.route(/\.(png|jpg|jpeg|mp4|mp3)$/, route => route.abort());
+    
+    // 资源拦截
+    await page.route(/\.(png|jpg|jpeg|mp4|mp3|gif|css|woff2?)$/, route => route.abort());
 
-    if (http_method === 'POST') {
-      await page.setExtraHTTPHeaders(headers);
-      await page.goto(targetUrl, { waitUntil: 'networkidle' });
-      await page.evaluate(([bodyStr]) => {
+    // 页面加载
+    const loadOptions = {
+      waitUntil: 'networkidle',
+      timeout: params.timeout || 30000
+    };
+
+    if (params.http_method === 'POST') {
+      await page.goto(params.url, loadOptions);
+      await page.evaluate(([body]) => {
         fetch(window.location.href, {
           method: 'POST',
-          body: bodyStr
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
         });
-      }, [body]);
-    } else if (html) {
-      await page.setContent(html, { waitUntil: 'networkidle' });
+      }, [params.body]);
+    } else if (params.html) {
+      await page.setContent(params.html, loadOptions);
     } else {
-      await page.goto(targetUrl, { waitUntil: 'networkidle' });
+      await page.goto(params.url, loadOptions);
     }
 
-    if (sourceRegex) {
-      return await page.waitForResponse(new RegExp(sourceRegex), {
-        timeout: 15000
-      }).then(res => res.text());
+    // 响应拦截
+    if (params.sourceRegex) {
+      try {
+        const regex = new RegExp(params.sourceRegex);
+        const response = await page.waitForResponse(regex, { timeout: 15000 });
+        return response.text();
+      } catch {
+        throw new Error(`Invalid regex: ${params.sourceRegex}`);
+      }
     }
 
-    if (js_source) {
-      return await page.evaluateHandle(js_source).then(async (handle) => {
-        const result = await handle.jsonValue();
-        return typeof result === 'string' ? result : JSON.stringify(result);
-      });
+    // JS执行
+    if (params.js_source) {
+      const result = await page.evaluate(params.js_source);
+      return typeof result === 'string' ? result : JSON.stringify(result);
     }
 
     return await page.content();
+
   } finally {
-    await context?.close();
+    try {
+      if (context) await context.close();
+      if (browser) await BrowserPool.release(browser);
+    } catch (err) {
+      logError(err, 'cleanup_failed');
+    }
   }
 };
 
@@ -107,24 +130,27 @@ const renderHtml = async (params) => {
 const server = http.createServer(async (req, res) => {
   try {
     const { pathname } = new URL(req.url, `http://${req.headers.host}`);
-    
+
     if (pathname === '/render.html') {
       const buffers = [];
       for await (const chunk of req) buffers.push(chunk);
       const params = JSON.parse(Buffer.concat(buffers).toString());
-      
+
       const result = await renderHtml(params);
       res.end(result);
     } else if (pathname === '/health') {
-      res.end(JSON.stringify({ status: 'healthy' }));
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({
+        status: 'ok',
+        browsers: BrowserPool.activeInstances
+      }));
     } else {
       res.statusCode = 404;
       res.end('Not Found');
     }
   } catch (err) {
-    logError(err, req.url);
     res.statusCode = 500;
-    res.end('Internal Server Error');
+    res.end(JSON.stringify({ error: err.message }));
   }
 });
 
@@ -134,8 +160,8 @@ server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
 
-// 优雅退出
+// 优雅关闭
 process.on('SIGTERM', async () => {
-  await new BrowserPool().cleanup();
+  await Promise.all(BrowserPool.pool.map(b => b.close()));
   server.close();
 });
