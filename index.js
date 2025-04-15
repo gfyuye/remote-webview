@@ -22,10 +22,15 @@ class BrowserPool {
   }
 
   async launch() {
-    const browser = await chromium.launch({
-      headless: true,
-      args: ['--disable-dev-shm-usage', '--no-sandbox']
-    });
+const browser = await chromium.launch({
+  headless: true,
+  args: [
+    '--disable-dev-shm-usage',
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-gpu'
+  ]
+});
     this.browsers.add(browser);
     return browser;
   }
