@@ -8,11 +8,14 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install --production
 
-# 复制项目文件
-COPY . .
+# 创建非 root 用户并赋予权限（关键修复）
+RUN useradd -m -u 1001 playwright && \
+    chown -R playwright:playwright /app
 
-# 设置非 root 用户
-RUN chown -R playwright:playwright /app
+# 复制项目文件（在用户切换前完成）
+COPY --chown=playwright:playwright . .
+
+# 切换用户
 USER playwright
 
 # 暴露端口
