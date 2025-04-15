@@ -48,27 +48,27 @@
 
         部署方式：
         # 本地运行
-docker build -t web-renderer . 
-docker run -p 8050:8050 web-renderer
+docker build -t remote-webview . 
+docker run -p 8050:8050 remote-webview
 
 # Cloud Run 部署
-gcloud run deploy web-renderer \
+gcloud run deploy remote-webview \
   --port 8050 \
   --memory 2Gi \
   --cpu 2 \
-  --image gcr.io/your-project/web-renderer
+  --image gcr.io/your-project/remote-webview
 
   # 基础运行（端口映射）
-docker run -p 8050:8050 web-renderer
+docker run -p 8050:8050 remote-webview
 
 # 带环境变量（例如覆盖端口）
-docker run -p 8080:8050 -e PORT=8050 web-renderer
+docker run -p 8080:8050 -e PORT=8050 remote-webview
 
 # 生产环境推荐配置（资源限制 + 重启策略）
 docker run -d \
-  --name render-service \
+  --name gfyuye/remote-webview \
   --restart unless-stopped \
   --memory 2g \
   --cpus 2 \
   -p 8050:8050 \
-  web-renderer
+  remote-webview
