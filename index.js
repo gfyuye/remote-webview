@@ -1,6 +1,6 @@
 const http = require('http');
 const { URL } = require('url');
-const { chromium } = require('playwright');
+const { chromium, devices } = require('playwright');
 
 // 增强错误日志
 const logError = (error, context = '') => {
@@ -64,12 +64,13 @@ const renderHtml = async (params) => {
     }
 
     // 获取浏览器实例
-    browser = await BrowserPool.acquire();
-    context = await browser.newContext({
-      ignoreHTTPSErrors: true,
-      userAgent: params.headers?.['User-Agent'] || await chromium.userAgent(),
-      proxy: params.proxy ? parseProxy(params.proxy) : undefined
-    });
+context = await browser.newContext({
+  ...devices['Desktop Chrome'],      // 使用桌面版 Chrome 的预设配置
+  ignoreHTTPSErrors: true,
+  proxy: params.proxy ? parseProxy(params.proxy) : undefined,
+  // 允许自定义 User-Agent 覆盖预设
+  userAgent: params.headers?.['User-Agent'] || devices['Desktop Chrome'].userAgent
+});
 
     const page = await context.newPage();
     
